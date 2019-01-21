@@ -222,6 +222,7 @@ static unsigned int dev_num = 1;
 static struct cdev wlan_hdd_state_cdev;
 static struct class *class;
 static dev_t device;
+static bool hdd_loaded = false;
 
 #define HDD_OPS_INACTIVITY_TIMEOUT (120000)
 #define MAX_OPS_NAME_STRING_SIZE 20
@@ -15417,44 +15418,7 @@ static int wlan_hdd_state_ctrl_param_open(struct inode *inode,
 	return 0;
 }
 
-static void __hdd_inform_wifi_off(void)
-{
-	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
-	int ret;
-
-	ret = wlan_hdd_validate_context(hdd_ctx);
-	if (ret != 0)
-		return;
-
-	ucfg_blm_wifi_off(hdd_ctx->pdev);
-}
-
-static void hdd_inform_wifi_off(void)
-{
-	int ret;
-	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
-	struct osif_psoc_sync *psoc_sync;
-
-	if (!hdd_ctx) {
-		hdd_err("HDD context is Null");
-		return;
-	}
-
-	ret = osif_psoc_sync_op_start(wiphy_dev(hdd_ctx->wiphy), &psoc_sync);
-	if (ret)
-		return;
-
-	hdd_set_adapter_wlm_def_level(hdd_ctx);
-	__hdd_inform_wifi_off();
-
-	osif_psoc_sync_op_stop(psoc_sync);
-}
-
-void hdd_init_start_completion(void)
-{
-	INIT_COMPLETION(wlan_start_comp);
-}
-
+static int hdd_driver_load(void);
 static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 						const char __user *user_buf,
 						size_t count,
@@ -15486,7 +15450,15 @@ static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 		goto exit;
 	}
 
-	if (!cds_is_driver_loaded() || cds_is_driver_recovering()) {
+	if (!hdd_loaded) {
+		if (hdd_driver_load()) {
+			pr_err("%s: Failed to init hdd module\n", __func__);
+			goto exit;
+		}
+	}
+
+	if (!cds_is_driver_loaded()) {
+		init_completion(&wlan_start_comp);
 		rc = wait_for_completion_timeout(&wlan_start_comp,
 				msecs_to_jiffies(HDD_WLAN_START_WAIT_TIME));
 		if (!rc) {
@@ -15911,37 +15883,30 @@ static QDF_STATUS hdd_qdf_init(void)
 		goto event_deinit;
 	}
 
-	status = qdf_cpuhp_init();
-	if (QDF_IS_STATUS_ERROR(status)) {
-		hdd_err("Failed to init cpuhp; status:%u", status);
-		goto talloc_deinit;
-	}
+	hdd_set_conparam(con_mode);
 
-	status = qdf_trace_spin_lock_init();
-	if (QDF_IS_STATUS_ERROR(status)) {
-		hdd_err("Failed to init spinlock; status:%u", status);
-		goto cpuhp_deinit;
+	errno = pld_init();
+	if (errno) {
+		hdd_fln("Failed to init PLD; errno:%d", errno);
+		goto wakelock_destroy;
 	}
 
 	qdf_trace_init();
 	qdf_register_debugcb_init();
 
-	return QDF_STATUS_SUCCESS;
+	hdd_loaded = true;
+	pr_info("%s: driver loaded\n", WLAN_MODULE_NAME);
 
-cpuhp_deinit:
-	qdf_cpuhp_deinit();
-talloc_deinit:
-	qdf_talloc_feature_deinit();
-event_deinit:
-	qdf_event_list_destroy();
-	qdf_mc_timer_manager_exit();
-	qdf_periodic_work_feature_deinit();
-	qdf_delayed_work_feature_deinit();
-	qdf_mem_exit();
-	qdf_lock_stats_deinit();
-	qdf_debugfs_exit();
-print_deinit:
-	hdd_qdf_print_deinit();
+	return 0;
+
+pld_deinit:
+	pld_deinit();
+wakelock_destroy:
+	qdf_wake_lock_destroy(&wlan_wake_lock);
+comp_deinit:
+	hdd_component_deinit();
+hdd_deinit:
+	hdd_deinit();
 
 exit:
 	return status;
@@ -15965,6 +15930,44 @@ static void hdd_qdf_deinit(void)
 	qdf_lock_stats_deinit();
 	qdf_debugfs_exit();
 	hdd_qdf_print_deinit();
+}
+
+/**
+ * hdd_module_init() - Module init helper
+ *
+ * Module init helper function used by both module and static driver.
+ *
+ * Return: 0 for success, errno on failure
+ */
+static int hdd_module_init(void)
+{
+	int ret;
+
+	ret = wlan_hdd_state_ctrl_param_create();
+	if (ret)
+		pr_err("wlan_hdd_state_create:%x\n", ret);
+
+	return ret;
+}
+
+/**
+ * hdd_module_exit() - Exit function
+ *
+ * This is the driver exit point (invoked when module is unloaded using rmmod)
+ *
+ * Return: None
+ */
+static void __exit hdd_module_exit(void)
+{
+	hdd_driver_unload();
+}
+
+#undef hdd_fln
+
+static int fwpath_changed_handler(const char *kmessage,
+				  const struct kernel_param *kp)
+{
+	return param_set_copystring(kmessage, kp);
 }
 
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
