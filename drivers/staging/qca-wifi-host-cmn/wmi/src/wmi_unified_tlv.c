@@ -8513,7 +8513,27 @@ static bool is_service_enabled_tlv(wmi_unified_t wmi_handle,
 	struct wmi_soc *soc = wmi_handle->soc;
 
 	if (!soc->wmi_service_bitmap) {
-		WMI_LOGE("WMI service bit map is not saved yet");
+		WMI_LOGE("WMI service bit map is not saved yet\n");
+		return false;
+	}
+
+	/* if wmi_service_enabled was received with extended2 bitmap,
+	 * use WMI_SERVICE_EXT2_IS_ENABLED to check the services.
+	 */
+	if (soc->wmi_ext2_service_bitmap) {
+		if (!soc->wmi_ext_service_bitmap) {
+			wmi_err("WMI service ext bit map is not saved yet");
+			return false;
+		}
+		return WMI_SERVICE_EXT2_IS_ENABLED(soc->wmi_service_bitmap,
+				soc->wmi_ext_service_bitmap,
+				soc->wmi_ext2_service_bitmap,
+				service_id);
+	}
+
+	if (service_id >= WMI_MAX_EXT_SERVICE) {
+		WMI_LOGD("Service id %d but WMI ext2 service bitmap is NULL",
+			 service_id);
 		return false;
 	}
 
