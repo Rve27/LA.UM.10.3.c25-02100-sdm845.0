@@ -435,8 +435,7 @@ void wlan_cfg_fill_interrupt_mask(struct wlan_cfg_dp_soc_ctxt *wlan_cfg_ctx,
  * @psoc - Object manager psoc
  * Return: wlan_cfg_ctx - Handle to Configuration context
  */
-struct wlan_cfg_dp_soc_ctxt *
-wlan_cfg_soc_attach(struct cdp_ctrl_objmgr_psoc *psoc)
+struct wlan_cfg_dp_soc_ctxt *wlan_cfg_soc_attach(void)
 {
 	struct wlan_cfg_dp_soc_ctxt *wlan_cfg_ctx =
 		qdf_mem_malloc(sizeof(struct wlan_cfg_dp_soc_ctxt));

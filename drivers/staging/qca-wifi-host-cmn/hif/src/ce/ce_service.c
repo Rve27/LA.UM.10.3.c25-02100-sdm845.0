@@ -1448,7 +1448,214 @@ void ce_ipa_get_resource(struct CE_handle *ce,
 }
 #endif /* IPA_OFFLOAD */
 
-#ifdef HIF_CE_DEBUG_DATA_BUF
+static bool ce_check_int_watermark(struct CE_state *CE_state,
+				   unsigned int *flags)
+{
+	uint32_t ce_int_status;
+	uint32_t ctrl_addr = CE_state->ctrl_addr;
+	struct hif_softc *scn = CE_state->scn;
+
+	ce_int_status = CE_ENGINE_INT_STATUS_GET(scn, ctrl_addr);
+	if (ce_int_status & CE_WATERMARK_MASK) {
+		/* Convert HW IS bits to software flags */
+		*flags =
+			(ce_int_status & CE_WATERMARK_MASK) >>
+			CE_WM_SHFT;
+		return true;
+	}
+
+	return false;
+}
+
+static void ce_legacy_src_ring_setup(struct hif_softc *scn, uint32_t ce_id,
+			struct CE_ring_state *src_ring,
+			struct CE_attr *attr)
+{
+	uint32_t ctrl_addr;
+	uint64_t dma_addr;
+
+	QDF_ASSERT(ce_id < scn->ce_count);
+	ctrl_addr = CE_BASE_ADDRESS(ce_id);
+
+	src_ring->hw_index =
+		CE_SRC_RING_READ_IDX_GET_FROM_REGISTER(scn, ctrl_addr);
+	src_ring->sw_index = src_ring->hw_index;
+	src_ring->write_index =
+		CE_SRC_RING_WRITE_IDX_GET_FROM_REGISTER(scn, ctrl_addr);
+	dma_addr = src_ring->base_addr_CE_space;
+	CE_SRC_RING_BASE_ADDR_SET(scn, ctrl_addr,
+			(uint32_t)(dma_addr & 0xFFFFFFFF));
+
+	/* if SR_BA_ADDRESS_HIGH register exists */
+	if (is_register_supported(SR_BA_ADDRESS_HIGH)) {
+		uint32_t tmp;
+
+		tmp = CE_SRC_RING_BASE_ADDR_HIGH_GET(
+				scn, ctrl_addr);
+		tmp &= ~0x1F;
+		dma_addr = ((dma_addr >> 32) & 0x1F)|tmp;
+		CE_SRC_RING_BASE_ADDR_HIGH_SET(scn,
+				ctrl_addr, (uint32_t)dma_addr);
+	}
+	CE_SRC_RING_SZ_SET(scn, ctrl_addr, src_ring->nentries);
+	CE_SRC_RING_DMAX_SET(scn, ctrl_addr, attr->src_sz_max);
+#ifdef BIG_ENDIAN_HOST
+	/* Enable source ring byte swap for big endian host */
+	CE_SRC_RING_BYTE_SWAP_SET(scn, ctrl_addr, 1);
+#endif
+	CE_SRC_RING_LOWMARK_SET(scn, ctrl_addr, 0);
+	CE_SRC_RING_HIGHMARK_SET(scn, ctrl_addr, src_ring->nentries);
+
+}
+
+static void ce_legacy_dest_ring_setup(struct hif_softc *scn, uint32_t ce_id,
+				struct CE_ring_state *dest_ring,
+				struct CE_attr *attr)
+{
+	uint32_t ctrl_addr;
+	uint64_t dma_addr;
+
+	QDF_ASSERT(ce_id < scn->ce_count);
+	ctrl_addr = CE_BASE_ADDRESS(ce_id);
+	dest_ring->sw_index =
+		CE_DEST_RING_READ_IDX_GET_FROM_REGISTER(scn, ctrl_addr);
+	dest_ring->write_index =
+		CE_DEST_RING_WRITE_IDX_GET_FROM_REGISTER(scn, ctrl_addr);
+	dma_addr = dest_ring->base_addr_CE_space;
+	CE_DEST_RING_BASE_ADDR_SET(scn, ctrl_addr,
+			(uint32_t)(dma_addr & 0xFFFFFFFF));
+
+	/* if DR_BA_ADDRESS_HIGH exists */
+	if (is_register_supported(DR_BA_ADDRESS_HIGH)) {
+		uint32_t tmp;
+
+		tmp = CE_DEST_RING_BASE_ADDR_HIGH_GET(scn,
+				ctrl_addr);
+		tmp &= ~0x1F;
+		dma_addr = ((dma_addr >> 32) & 0x1F)|tmp;
+		CE_DEST_RING_BASE_ADDR_HIGH_SET(scn,
+				ctrl_addr, (uint32_t)dma_addr);
+	}
+
+	CE_DEST_RING_SZ_SET(scn, ctrl_addr, dest_ring->nentries);
+#ifdef BIG_ENDIAN_HOST
+	/* Enable Dest ring byte swap for big endian host */
+	CE_DEST_RING_BYTE_SWAP_SET(scn, ctrl_addr, 1);
+#endif
+	CE_DEST_RING_LOWMARK_SET(scn, ctrl_addr, 0);
+	CE_DEST_RING_HIGHMARK_SET(scn, ctrl_addr, dest_ring->nentries);
+}
+
+static uint32_t ce_get_desc_size_legacy(uint8_t ring_type)
+{
+	switch (ring_type) {
+	case CE_RING_SRC:
+		return sizeof(struct CE_src_desc);
+	case CE_RING_DEST:
+		return sizeof(struct CE_dest_desc);
+	case CE_RING_STATUS:
+		qdf_assert(0);
+		return 0;
+	default:
+		return 0;
+	}
+
+	return 0;
+}
+
+static int ce_ring_setup_legacy(struct hif_softc *scn, uint8_t ring_type,
+		uint32_t ce_id, struct CE_ring_state *ring,
+		struct CE_attr *attr)
+{
+	int status = Q_TARGET_ACCESS_BEGIN(scn);
+
+	if (status < 0)
+		goto out;
+
+
+	switch (ring_type) {
+	case CE_RING_SRC:
+		ce_legacy_src_ring_setup(scn, ce_id, ring, attr);
+		break;
+	case CE_RING_DEST:
+		ce_legacy_dest_ring_setup(scn, ce_id, ring, attr);
+		break;
+	case CE_RING_STATUS:
+	default:
+		qdf_assert(0);
+		break;
+	}
+
+	Q_TARGET_ACCESS_END(scn);
+out:
+	return status;
+}
+
+static void ce_prepare_shadow_register_v2_cfg_legacy(struct hif_softc *scn,
+			    struct pld_shadow_reg_v2_cfg **shadow_config,
+			    int *num_shadow_registers_configured)
+{
+	*num_shadow_registers_configured = 0;
+	*shadow_config = NULL;
+}
+
+#ifdef HIF_CE_LOG_INFO
+/**
+ * ce_get_index_info_legacy(): Get CE index info
+ * @scn: HIF Context
+ * @ce_state: CE opaque handle
+ * @info: CE info
+ *
+ * Return: 0 for success and non zero for failure
+ */
+static
+int ce_get_index_info_legacy(struct hif_softc *scn, void *ce_state,
+			     struct ce_index *info)
+{
+	struct CE_state *state = (struct CE_state *)ce_state;
+
+	info->id = state->id;
+	if (state->src_ring) {
+		info->u.legacy_info.sw_index = state->src_ring->sw_index;
+		info->u.legacy_info.write_index = state->src_ring->write_index;
+	} else if (state->dest_ring) {
+		info->u.legacy_info.sw_index = state->dest_ring->sw_index;
+		info->u.legacy_info.write_index = state->dest_ring->write_index;
+	}
+
+	return 0;
+}
+#endif
+
+struct ce_ops ce_service_legacy = {
+	.ce_get_desc_size = ce_get_desc_size_legacy,
+	.ce_ring_setup = ce_ring_setup_legacy,
+	.ce_sendlist_send = ce_sendlist_send_legacy,
+	.ce_completed_recv_next_nolock = ce_completed_recv_next_nolock_legacy,
+	.ce_revoke_recv_next = ce_revoke_recv_next_legacy,
+	.ce_cancel_send_next = ce_cancel_send_next_legacy,
+	.ce_recv_buf_enqueue = ce_recv_buf_enqueue_legacy,
+	.ce_per_engine_handler_adjust = ce_per_engine_handler_adjust_legacy,
+	.ce_send_nolock = ce_send_nolock_legacy,
+	.watermark_int = ce_check_int_watermark,
+	.ce_completed_send_next_nolock = ce_completed_send_next_nolock_legacy,
+	.ce_recv_entries_done_nolock = ce_recv_entries_done_nolock_legacy,
+	.ce_send_entries_done_nolock = ce_send_entries_done_nolock_legacy,
+	.ce_prepare_shadow_register_v2_cfg =
+		ce_prepare_shadow_register_v2_cfg_legacy,
+#ifdef HIF_CE_LOG_INFO
+	.ce_get_index_info =
+		ce_get_index_info_legacy,
+#endif
+};
+
+
+struct ce_ops *ce_services_legacy(void)
+{
+	return &ce_service_legacy;
+}
+
+#if HIF_CE_DEBUG_DATA_BUF
 /**
  * hif_dump_desc_data_buf() - record ce descriptor events
  * @buf: buffer to copy to
