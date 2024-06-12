@@ -5,7 +5,7 @@
 # A mix between the arm64 and arm vDSO Makefiles.
 
 ifeq ($(cc-name),clang)
-  CC_ARM32 := $(CC) $(CLANG_TARGET_ARM32) $(CLANG_GCC32_TC) $(CLANG_PREFIX32)
+  CC_ARM32 := $(CC) $(CLANG_TARGET_ARM32)
   ifneq ($(LLVM_IAS),1)
     CC_ARM32 += -no-integrated-as
   endif
